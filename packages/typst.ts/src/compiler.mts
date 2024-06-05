@@ -390,6 +390,13 @@ class TypstCompilerDriver {
     return this.runSyncCodeUntilStable(() => this.compiler.get_ast(mainFilePath));
   }
 
+  async getMapping(mainFilePath: string): Promise<{
+    files: string[];
+    data: Uint32Array;
+  }> {
+    return this.runSyncCodeUntilStable(() => this.compiler.get_mapping(mainFilePath) as any);
+  }
+
   async runSyncCodeUntilStable<T>(execute: () => T): Promise<T> {
     for (;;) {
       console.log(this.compiler.get_loaded_fonts());

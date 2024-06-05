@@ -43,6 +43,15 @@
 <span style="color:#c0caf5">Compiled to AST in <span style="color:#7dcfff">${rounded}</span>ms</span>`;
 
             terminalContent.innerHTML = [compileInfo, ast].join('\n');
+          } else if (fmt === 'mapping') {
+            const mapping = await compilerPlugin.getMapping(mainFilePath);
+            const end = performance.now();
+            const rounded = Math.round((end - begin) * 1000) / 1000;
+
+            const compileInfo = `---
+<span style="color:#c0caf5">Compiled to Mapping in <span style="color:#7dcfff">${rounded}</span>ms</span>`;
+
+            terminalContent.innerHTML = [compileInfo, mapping].join('\n');
           } else if (fmt === 'pdf') {
             const pdfData = await compilerPlugin.compile({
               mainFilePath,
@@ -92,6 +101,9 @@
           .then(() => {
             document.getElementById('compile-button').addEventListener('click', () => {
               runCompile('ast');
+            });
+            document.getElementById('mapping-button').addEventListener('click', () => {
+              runCompile('mapping');
             });
             document.getElementById('compile-to-pdf-button').addEventListener('click', () => {
               runCompile('pdf');
@@ -173,6 +185,7 @@
       <div class="content">
         <div>
           <button id="compile-button">Export to AST</button>
+          <button id="mapping-button">Export to Mapping</button>
           <button id="compile-to-pdf-button">Export to PDF</button>
         </div>
         <div class="terminal">

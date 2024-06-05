@@ -14,11 +14,7 @@ use typst_ts_compiler::{
     world::WorldSnapshot,
 };
 use typst_ts_core::{
-    cache::FontInfoCache,
-    diag::SourceDiagnostic,
-    error::{long_diag_from_std, prelude::*, DiagMessage},
-    typst::{self, foundations::IntoValue, prelude::EcoVec},
-    DynExporter, Exporter, FontLoader, FontSlot, TypstDocument, TypstFont, TypstWorld,
+    cache::FontInfoCache, diag::SourceDiagnostic, error::{long_diag_from_std, prelude::*, DiagMessage}, typst::{self, foundations::IntoValue, prelude::EcoVec}, DynExporter, Exporter, FontLoader, FontSlot, TypstDocument, TypstFileId, TypstFont, TypstFrame, TypstTransform, TypstWorld 
 };
 use wasm_bindgen::prelude::*;
 
@@ -306,6 +302,41 @@ impl TypstCompiler {
         Ok(converted)
     }
 
+    pub fn get_mapping(&mut self, main_file_path: String) -> Result<js_sys::Object, JsValue> {
+        self.compiler
+            .set_entry_file(Path::new(&main_file_path).into())
+            .map_err(|e| format!("{e:?}"))?;
+
+        // compile and export document
+        let doc = self
+            .compiler
+            .compile(&mut Default::default())
+            .map_err(|e| format!("{e:?}"))?;
+
+        let mut items = Vec::new();
+        let mut files = Vec::new();
+        for (page_index, page) in doc.pages.iter().enumerate() {
+            collect_frame(self.compiler.world(), &mut items, &mut files, &page.frame, page_index, TypstTransform::identity())?;
+        }
+
+        let obj = js_sys::Object::new();
+
+        let js_files = js_sys::Array::new();
+        for file_id in files {
+            js_files.push(
+                &JsValue::from_str(file_id.vpath().as_rooted_path().as_os_str().to_str().unwrap())
+            );
+        };
+
+        js_sys::Reflect::set(&obj, &"files".into(), &JsValue::from(js_files)).unwrap();
+        js_sys::Reflect::set(
+            &obj,
+            &"data".into(),
+            &Uint32Array::from(&items[..]).into(),
+        )?;
+        Ok(obj)
+    }
+
     pub fn get_semantic_token_legend(&mut self) -> Result<JsValue, JsValue> {
         let tokens = self.compiler.world_mut().get_semantic_token_legend();
         serde_wasm_bindgen::to_value(tokens.as_ref()).map_err(|e| format!("{e:?}").into())
@@ -466,6 +497,44 @@ impl TypstCompiler {
             v
         })
     }
+}
+
+fn collect_frame(world: &dyn TypstWorld, items: &mut Vec<u32>, sources: &mut Vec<TypstFileId>, frame: &TypstFrame, page_index: usize, transform: TypstTransform) -> ZResult<()> {
+    for (mut point, item) in frame.items() {
+        match item {
+            typst::TypstFrameItem::Group(item) => {
+                collect_frame(world, items, sources,&item.frame, page_index, transform.post_concat(item.transform))?;
+            },
+            typst::TypstFrameItem::Text(item) => {
+                for glyph in &item.glyphs {
+                    if let Some(source_id) = glyph.span.0.id() {
+                        let source = world.source(source_id).unwrap();
+                        let file_index = if let Some(file_index) = sources.iter().position(|x| x == &source_id) {
+                            file_index
+                        } else {
+                            sources.push(
+                                source_id
+                            );
+                            sources.len() - 1
+                        };
+                        if let Some(range) = source.find(glyph.span.0) {
+                            items.push(page_index as u32);
+                            let transformed_point = point.transform(transform);
+                            items.push((transformed_point.x.to_raw() * 1000.0) as u32);
+                            items.push((transformed_point.y.to_raw() * 1000.0) as u32);
+                            items.push(file_index as u32);
+                            items.push(range.offset() as u32 + glyph.span.1 as u32);
+                            point.x += glyph.x_advance.at(item.size);
+                        }
+                    }
+                }
+            }
+            _ => {
+
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
