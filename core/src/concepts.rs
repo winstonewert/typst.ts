@@ -26,7 +26,7 @@ pub mod typst {
         pub use typst::model::Document as TypstDocument;
 
         pub use typst::layout::Frame as TypstFrame;
-        
+
         pub use typst::layout::FrameItem as TypstFrameItem;
 
         pub use typst::layout::Transform as TypstTransform;

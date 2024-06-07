@@ -3,7 +3,8 @@ use std::{fmt::Write, path::Path, sync::Arc};
 
 use base64::Engine;
 use comemo::Prehashed;
-use js_sys::{Array, JsString, Uint32Array, Uint8Array};
+use js_sys::{Array, Float64Array, JsString, Uint16Array, Uint32Array, Uint8Array};
+use serde_json::map;
 pub use typst_ts_compiler::*;
 use typst_ts_compiler::{
     font::web::BrowserFontSearcher,
@@ -14,7 +15,12 @@ use typst_ts_compiler::{
     world::WorldSnapshot,
 };
 use typst_ts_core::{
-    cache::FontInfoCache, diag::SourceDiagnostic, error::{long_diag_from_std, prelude::*, DiagMessage}, typst::{self, foundations::IntoValue, prelude::EcoVec}, DynExporter, Exporter, FontLoader, FontSlot, TypstDocument, TypstFileId, TypstFont, TypstFrame, TypstTransform, TypstWorld 
+    cache::FontInfoCache,
+    diag::SourceDiagnostic,
+    error::{long_diag_from_std, prelude::*, DiagMessage},
+    typst::{self, foundations::IntoValue, prelude::EcoVec},
+    DynExporter, Exporter, FontLoader, FontSlot, TypstDocument, TypstFileId, TypstFont, TypstFrame,
+    TypstTransform, TypstWorld,
 };
 use wasm_bindgen::prelude::*;
 
@@ -313,28 +319,19 @@ impl TypstCompiler {
             .compile(&mut Default::default())
             .map_err(|e| format!("{e:?}"))?;
 
-        let mut items = Vec::new();
-        let mut files = Vec::new();
+        let mut mapping = Mapping::default();
         for (page_index, page) in doc.pages.iter().enumerate() {
-            collect_frame(self.compiler.world(), &mut items, &mut files, &page.frame, page_index, TypstTransform::identity())?;
+            collect_frame(
+                self.compiler.world(),
+                &mut mapping,
+                &page.frame,
+                page_index,
+                TypstTransform::identity(),
+            )?;
         }
 
-        let obj = js_sys::Object::new();
-
-        let js_files = js_sys::Array::new();
-        for file_id in files {
-            js_files.push(
-                &JsValue::from_str(file_id.vpath().as_rooted_path().as_os_str().to_str().unwrap())
-            );
-        };
-
-        js_sys::Reflect::set(&obj, &"files".into(), &JsValue::from(js_files)).unwrap();
-        js_sys::Reflect::set(
-            &obj,
-            &"data".into(),
-            &Uint32Array::from(&items[..]).into(),
-        )?;
-        Ok(obj)
+        
+        Ok(mapping.into_js_object())
     }
 
     pub fn get_semantic_token_legend(&mut self) -> Result<JsValue, JsValue> {
@@ -499,39 +496,95 @@ impl TypstCompiler {
     }
 }
 
-fn collect_frame(world: &dyn TypstWorld, items: &mut Vec<u32>, sources: &mut Vec<TypstFileId>, frame: &TypstFrame, page_index: usize, transform: TypstTransform) -> ZResult<()> {
+#[derive(Default)]
+struct Mapping {
+    file_definitions: Vec<TypstFileId>,
+    pages: Vec<u16>,
+    x: Vec<f64>,
+    y: Vec<f64>,
+    files: Vec<u16>,
+    offsets: Vec<u32>,
+    characters: Vec<u16>,
+}
+
+impl Mapping {
+    fn resolve_file(&mut self, file: TypstFileId) -> u16 {
+        u16::try_from(
+            if let Some(file_index) = self.file_definitions.iter().position(|x| x == &file) {
+                file_index
+            } else {
+                self.file_definitions.push(file);
+                self.file_definitions.len() - 1
+            },
+        )
+        .unwrap()
+    }
+
+    fn into_js_object(self) -> js_sys::Object {
+        let obj = js_sys::Object::new();
+
+        let js_files = js_sys::Array::new();
+        for file_id in self.file_definitions {
+            js_files.push(&JsValue::from_str(
+                file_id
+                    .vpath()
+                    .as_rooted_path()
+                    .as_os_str()
+                    .to_str()
+                    .unwrap(),
+            ));
+        }
+
+        js_sys::Reflect::set(&obj, &"file_definitions".into(), &JsValue::from(js_files)).unwrap();
+        js_sys::Reflect::set(&obj, &"pages".into(), &Uint16Array::from(&self.pages[..]).into()).unwrap();
+        js_sys::Reflect::set(&obj, &"x".into(), &Float64Array::from(&self.x[..]).into()).unwrap();
+        js_sys::Reflect::set(&obj, &"y".into(), &Float64Array::from(&self.y[..]).into()).unwrap();
+        js_sys::Reflect::set(&obj, &"files".into(), &Uint16Array::from(&self.files[..]).into()).unwrap();
+        js_sys::Reflect::set(&obj, &"offsets".into(), &Uint32Array::from(&self.offsets[..]).into()).unwrap();
+        js_sys::Reflect::set(&obj, &"characters".into(), &Uint16Array::from(&self.characters[..]).into()).unwrap();
+
+        obj
+    }
+}
+
+fn collect_frame(
+    world: &dyn TypstWorld,
+    mapping: &mut Mapping,
+    frame: &TypstFrame,
+    page_index: usize,
+    transform: TypstTransform,
+) -> Result<(), JsValue> {
     for (mut point, item) in frame.items() {
         match item {
             typst::TypstFrameItem::Group(item) => {
-                collect_frame(world, items, sources,&item.frame, page_index, transform.post_concat(item.transform))?;
-            },
+                collect_frame(
+                    world,
+                    mapping,
+                    &item.frame,
+                    page_index,
+                    transform.post_concat(TypstTransform::translate(point.x, point.y)).post_concat(item.transform),
+                )?;
+            }
             typst::TypstFrameItem::Text(item) => {
                 for glyph in &item.glyphs {
-                    if let Some(source_id) = glyph.span.0.id() {
-                        let source = world.source(source_id).unwrap();
-                        let file_index = if let Some(file_index) = sources.iter().position(|x| x == &source_id) {
-                            file_index
-                        } else {
-                            sources.push(
-                                source_id
-                            );
-                            sources.len() - 1
-                        };
+                    if let Some(file_id) = glyph.span.0.id() {
+                        let file_index = mapping.resolve_file(file_id);
+                        let source = world.source(file_id).unwrap();
+                        
                         if let Some(range) = source.find(glyph.span.0) {
-                            items.push(page_index as u32);
-                            let transformed_point = point.transform(transform);
-                            items.push((transformed_point.x.to_raw() * 1000.0) as u32);
-                            items.push((transformed_point.y.to_raw() * 1000.0) as u32);
-                            items.push(file_index as u32);
-                            items.push(range.offset() as u32 + glyph.span.1 as u32);
-                            point.x += glyph.x_advance.at(item.size);
+                                mapping.pages.push(u16::try_from(page_index).unwrap());
+                                let transformed_point = point.transform(transform);
+                                mapping.x.push(transformed_point.x.to_raw());
+                                mapping.y.push(transformed_point.y.to_raw());
+                                mapping.files.push(file_index);
+                                mapping.offsets.push(u32::try_from(range.offset()).unwrap());
+                                mapping.characters.push(glyph.span.1);
+                                point.x += glyph.x_advance.at(item.size);
                         }
                     }
                 }
             }
-            _ => {
-
-            }
+            _ => {}
         }
     }
     Ok(())
